@@ -1,1 +1,274 @@
+library('fitR')
+library("coda")
+library("lattice") 
+
+##data load
+Dataseries<-read.table(file.choose(), header=T, na.strings="NA", sep=",")
+
+
+
+#mathematical model(both human and mosquito) code 
+
+SEIARXYZ_name <- "SEIAR with constant population size"
+SEIARXYZ_state.names <- c("S","E","I","A","R", "X", "Y", "Z")
+SEIARXYZ_theta.names <- c("epsilon","beta", "mu","Si_lambd","Sa_lambd","O_alph","delta","Tw_alph","th_alph", "segma_a", "segma_i", "mu_v", "beta_v", "omga")
+
+SEIARXYZ_simulateDeterministic <- function(theta,init.state,times) {
+  
+  SEIARXYZ_ode <- function(time, state, theta) {
+    
+    ## parameters
+    lambd<- theta[["epsilon"]]*theta[["beta"]] 
+    mu <- theta[["mu"]]
+    nu <-  1 / theta[["Si_lambd"]]
+    rho <- theta[["Sa_lambd"]]
+    alpha_1 <-  1 / theta[["O_alph"]]
+    delta <- theta[["delta"]]
+    alpha_2 <- 1 / theta[["Tw_alph"]]
+    alpha_3 <- 1 / theta[["th_alph"]]
+    lambda_a <- theta[["segma_a"]]*theta[["epsilon"]]
+    lambda_i <- theta[["segma_i"]]*theta[["epsilon"]]
+    mu_v <- theta[["mu_v"]]
+    Beta_v <- 1 / theta[["beta_v"]]
+    
+    ## states
+    S <- state[["S"]]
+    E <- state[["E"]]
+    I <- state[["I"]]
+    A <- state[["A"]]
+    R <- state[["R"]]
+    
+    X <- state[["X"]]
+    Y <- state[["Y"]]
+    Z <- state[["Z"]]
+    N <- S + E + I + A + R
+    
+    dS <- -lambd * S * Z/N + alpha_3 * R - mu * S
+    dE <- lambd * S * Z/N - nu * E - rho * E - mu * E 
+    dI <- nu * E - alpha_1 * I - delta * I - mu * I
+    dA <- rho * E - alpha_2 * A - mu * A 
+    dR <- alpha_1 * I + alpha_2 * A - alpha_3 * R - mu * R
+    
+    dX <-  - lambda_i* X * I/N - lambda_a * X * A/N - mu_v * X
+    dY <- lambda_i * X * I/N   + lambda_a  * X * A/N - mu_v * Y - Beta_v * Y
+    dZ <- Beta_v * Y - mu_v * Z
+    
+    return(list(c(dS, dE, dI, dA, dR, dX, dY, dZ)))
+  }
+  
+  trajectory <- data.frame(ode(y = init.state,
+                               times = times,
+                               func = SEIARXYZ_ode,
+                               parms = theta,
+                               method = "ode45"))
+  
+  return(trajectory)
+}
+
+## function to compute log-prior##############
+SEIARXYZ_prior <- function(theta, log = FALSE) {
+  
+  ## uniform prior on R0: U[1,100]
+  log.prior.eps <- dunif(theta[["epsilon"]], min = 0, max = 1000, log = TRUE)
+  ## uniform prior on infectious period: U[0,30]
+  log.prior.bet <- dunif(theta[["beta"]], min = 0, max = 1, log = TRUE)
+  log.prior.mu <- dunif(theta[["mu"]], min = 0, max = 1, log = TRUE)
+  log.prior.lamdi <- dunif(theta[["Si_lambd"]], min = 0, max = 20, log = TRUE)
+  log.prior.lamda <- dunif(theta[["Sa_lambd"]], min = 0, max = 1, log = TRUE)
+  log.prior.delt <- dunif(theta[["delta"]], min = 0, max = 1, log = TRUE)
+  log.prior.alpho <- dunif(theta[["O_alph"]], min = 0, max = 100, log = TRUE)
+  log.prior.alphtw <- dunif(theta[["Tw_alph"]], min = 0, max = 300, log = TRUE)
+  log.prior.alphth <- dunif(theta[["th_alph"]], min = 0, max = 100, log = TRUE)
+  log.prior.segma_i <- dunif(theta[["segma_i"]], min = 0, max = 1, log = TRUE)
+  log.prior.segma_a <- dunif(theta[["segma_a"]], min = 0, max = 1, log = TRUE)
+  log.prior.mu_v <- dunif(theta[["mu_v"]], min = 0, max = 1, log = TRUE)
+  log.prior.Beta_v <- dunif(theta[["beta_v"]], min = 0, max = 20, log = TRUE)
+  log.prior.reporting.rate <- dunif(theta[["omga"]], min = 0,  max = 1, log = TRUE)
+  
+  log.sum <- log.prior.eps + log.prior.bet + log.prior.mu + log.prior.lamdi +  log.prior.lamda 
+ + log.prior.delt + log.prior.alpho + log.prior.alphtw + log.prior.alphth +   log.prior.segma_i 
+  +  log.prior.segma_a + log.prior.mu_v +   log.prior.Beta_v + log.prior.reporting.rate
+  
+  return(ifelse(log, log.sum, exp(log.sum)))
+}
+
+
+
+## function to compute the likelihood of one data point
+SEIARXYZ_pointLike <- function(data.point, model.point, theta, log = TRUE){
+  
+  ## the prevalence is observed through a Poisson process
+  return(dpois(x = data.point[["obs"]],
+               lambda = theta[["omga"]] * model.point[["I"]],
+               log = log))
+}
+
+## function to generate observation from a model simulation
+SEIARXYZ_genObsPoint <- function(model.point, theta){
+  
+  ## the prevalence is observed through a Poisson process
+  obs.point <- rpois(n = 1, lambd = theta[["omga"]] * model.point[["I"]])
+  
+  return(c(obs = obs.point))
+}
+
+## create deterministic SEIARXYZ fitmodel
+SEIARXYZ <- fitmodel(
+  name = SEIARXYZ_name,
+  state.names = SEIARXYZ_state.names,
+  theta.names = SEIARXYZ_theta.names,
+  simulate = SEIARXYZ_simulateDeterministic,
+  dprior = SEIARXYZ_prior,
+  rPointObs = SEIARXYZ_genObsPoint,
+  dPointObs = SEIARXYZ_pointLike)
+##################### Model Simulation###########
+#theta <- c(epsilon = 110, beta = 0.75, mu = 0.000514, Si_lambd = 0.03523, Sa_lambd = 0.0071, O_alph =56,
+              #   delta = 0.0004, Tw_alph = 200, th_alph = 7210, 
+              #    segma_a=0.0084, segma_i=0.092, mu_v=0.0013, beta_v=0.08, omga=0.88)
+           #init.state <- c(S = 9998, E = 0, I = 100, A = 1, R = 0, X = 500, Y=0, Z=1) #s=7255
+           ### mu_v=0.04,  beta_v=0.12
+
+############ wbgz  fitting param estimate
+
+theta <- c(epsilon = 24.5, beta = 0.44, mu = 0.00000516, Si_lambd = 12, Sa_lambd = 0.0071,
+   O_alph =48, delta = 0.00027, Tw_alph = 200, th_alph = 25, 
+   segma_a=0.2, segma_i=0.32784, mu_v=0.132, beta_v=12, omga= 0.75)
+init.state <- c(S = 266745, E = 0, I = 50.00, A = 0, R = 0, X = 800, Y=0, Z=0) #s=7255
+
+plotFit(SEIARXYZ, theta, init.state, Dataseries, n.replicates = 100)#, all.vars = TRUE) #, n.replicates= 100) #to plot all variable add all.vars = TRUE
+#times <- 1:50
+
+
+##setting MCMC to above model, the below 
+
+
+my_dLogPosterior <- function(fitmodel, theta, init.state, data) {
+  
+  # calculate the fitmodel prior for parameter vector theta using
+  # fitmodel$dprior, and assign to variable log.prior
+  log.prior <- fitmodel$dprior(theta, log = TRUE)
+  
+  # calculate the log-likelihood of `theta`
+  # and `init.state` with respect to the data using `dTrajObs`
+  # and assign to a variable `log.likelihood`    
+  log.likelihood <- dTrajObs(fitmodel, theta, init.state, data, log = TRUE)
+  
+  # calulate the log-posterior using the log-prior and log-likelihood
+  log.posterior <- log.prior + log.likelihood
+  
+  return(log.posterior)
+  
+}
+
+
+
+# wrapper for posterior
+my_posteriorTdCc <- function(theta) {
+  
+  my_fitmodel <- SEIARXYZ
+  my_init.state <- c(S = 778342, E = 0, I = 200.00, A = 0, R = 0, X = 500, Y=0, Z=0) 
+  #my_init.state <- c(S = 266745, E = 0, I = 50.00, A = 0, R = 0, X = 800, Y=0, Z=0) 
+  return(logPosterior(fitmodel = my_fitmodel, theta = theta, init.state = my_init.state, 
+                      data = Dataseries, margLogLike = dTrajObs, log = TRUE))
+  
+}
+
+#chain 1 2011 wrp for 500 iter fst
+init.theta <- c(epsilon = 48, beta = 0.44, mu = 0.0000616, Si_lambd = 12, Sa_lambd = 0.0071, 
+           O_alph =22.1, delta = 0.00027, Tw_alph = 200, th_alph = 25, 
+           segma_a=0.24, segma_i=0.789852, mu_v=0.132, beta_v=12, omga= 0.85)#0.58
+proposal.sd <- c(epsilon = 30, beta = 0.32, mu = 0.00006612, Si_lambd = 8, Sa_lambd = 0.007, 
+                            O_alph =5, delta = 0.0001, Tw_alph = 100, th_alph = 15,#25 
+                             segma_a=0.21, segma_i=0.032, mu_v=0.1, beta_v=8, omga=0.65)
+                 
+
+#chain 1 2013 wbz for 500 iter fst
+#init.theta <- c(epsilon = 99.5, beta = 0.58, mu = 0.00006616, Si_lambd = 12, Sa_lambd = 0.071,
+    #            O_alph =48, delta = 0.00027, Tw_alph = 200, th_alph = 25, #35
+     #           segma_a=0.8, segma_i=0.062784, mu_v=0.132, beta_v=12, omga= 0.85)
+#proposal.sd <- c(epsilon = 70, beta = 0.44, mu = 0.00006612, Si_lambd = 8, Sa_lambd = 0.007, 
+   #              O_alph =5, delta = 0.0001, Tw_alph = 100, th_alph = 15,#25 
+ #                segma_a=0.21, segma_i=0.032, mu_v=0.1, beta_v=8, omga=0.65)
+
+#chain 1 2012 wbz for 500 iter fst
+#init.theta <- c(epsilon = 99.5, beta = 0.58, mu = 0.00006616, Si_lambd = 12, Sa_lambd = 0.071,
+ #               O_alph =48, delta = 0.00027, Tw_alph = 200, th_alph = 25, #35
+ #               segma_a=0.8, segma_i=0.062784, mu_v=0.132, beta_v=12, omga= 0.85)
+#proposal.sd <- c(epsilon = 70, beta = 0.44, mu = 0.00006612, Si_lambd = 8, Sa_lambd = 0.007, 
+ #                O_alph =5, delta = 0.0001, Tw_alph = 100, th_alph = 15,#25 
+  #               segma_a=0.21, segma_i=0.032, mu_v=0.1, beta_v=8, omga=0.65)
+
+#chain 1 2011 wbz for 500 iter fst
+#init.theta <- c(epsilon = 99.5, beta = 0.58, mu = 0.00006616, Si_lambd = 12, Sa_lambd = 0.071,
+    #            O_alph =48, delta = 0.00027, Tw_alph = 200, th_alph = 25, #35
+   #             segma_a=0.8, segma_i=0.062784, mu_v=0.132, beta_v=12, omga= 0.85)
+#proposal.sd <- c(epsilon = 70, beta = 0.44, mu = 0.00006612, Si_lambd = 8, Sa_lambd = 0.007, 
+  #                O_alph =5, delta = 0.0001, Tw_alph = 100, th_alph = 15,#25 
+   #               segma_a=0.21, segma_i=0.032, mu_v=0.1, beta_v=8, omga=0.65)
+
+#chain 2 142.5 = epsilon, beta=0.85, silambd=18, oalph=60, thralph=25
+
+# diagonal elements of the covariance matrix for the Gaussian proposal th-alph 25
+#proposal.sd <- c(epsilon = 70, beta = 0.44, mu = 0.00006612, Si_lambd = 8, Sa_lambd = 0.007, 
+   #              O_alph =5, delta = 0.0001, Tw_alph = 100, th_alph = 15, 
+     #            segma_a=0.21, segma_i=0.032, mu_v=0.1, beta_v=8, omga=0.65)
+
+# lower and upper limits of each parameter
+lower <- c(epsilon = 0, beta = 0, mu = 0, Si_lambd = 0, Sa_lambd = 0, O_alph =0,
+           delta = 0, Tw_alph = 0, th_alph = 0, 
+           segma_a=0, segma_i=0, mu_v=0, beta_v=0, omga=0)
+
+upper <- c(epsilon = Inf, beta = 1, mu = 1, Si_lambd = Inf, Sa_lambd = 1, O_alph =Inf,
+           delta = 1, Tw_alph = Inf, th_alph =Inf, 
+           segma_a=1, segma_i=1, mu_v=1, beta_v= Inf, omga=1)
+
+# number of iterations for the MCMC
+n.iterations <- 500
+
+# additional parameters for the adaptive MCMC, see ?mcmcMH for more details
+adapt.size.start <- 100
+adapt.size.cooling <- 0.999
+adapt.shape.start <- 200
+
+## to run the MCMC below
+#Iteration: 5000/5000, acceptance rate: 0.044, scaling.sd: 0.636, scaling.multiplier: 1.021, state: epsilon = 222.71 | beta = 0.95 | mu = 0.00 | Si_lambd = 8.18 | Sa_lambd = 0.08 | O_alph = 22.55 | delta = 0.00 | Tw_alph = 361.15 | th_alph = 29.80 | segma_a = 0.09 | segma_i = 0.06 | mu_v = 0.17 | beta_v = 40.85 | omga = 0.99 | log.prior = -9.90 | log.likelihood = -12153.44 | log.posterior = -12163.34
+# logdensity: -12163.3424134384
+
+#Iteration: 1000/5000, acceptance rate: 0.210, scaling.sd: 0.636, scaling.multiplier: 1.021, state: epsilon = 224.21 | beta = 0.99 | mu = 0.00 | Si_lambd = 10.52 | Sa_lambd = 0.08 | O_alph = 22.98 | delta = 0.00 | Tw_alph = 310.53 | th_alph = 25.73 | segma_a = 0.14 | segma_i = 0.07 | mu_v = 0.17 | beta_v = 40.79 | omga = 0.96 | log.prior = -9.90 | log.likelihood = -12223.72 | log.posterior = -12233.62
+#, logdensity: -12233.6243287723
+
+
+my_mcmc.TdC <- mcmcMH(target = my_posteriorTdCc,
+                      init.theta = init.theta,
+                      proposal.sd = proposal.sd,
+                      limits = list(lower = lower,upper = upper),
+                      n.iterations = n.iterations,
+                      adapt.size.start = adapt.size.start,
+                      adapt.size.cooling = adapt.size.cooling,
+                      adapt.shape.start = adapt.shape.start) # ths take too long
+
+       # my_trace <- mcmc(my_mcmc.TdC$trace)
+#xyplot(my_trace)
+
+mm<-matrix(0, nrow=501, ncol=1)
+for (i in 1:18){mm<-cbind(mm, stack(my_mcmc.TdC$trace[[i]])[,1])}
+mm<-mm[,-1]
+colnames(mm)<-names(my_mcmc.TdC$trace)
+mode(mm)
+dim(mm)
+my_trace <- mcmc(mm)
+xyplot(my_trace)
+
+
+par(mfrow=c(4,4), mar=c(3,3,.5,.5))
+for (i in 1:16){plot( mm[,i], type="l")}
+init.state <- c(S = 778342, E = 0, I = 200.00, A = 0, R = 0, X = 500, Y=0, Z=0) #s=7255 wrp initil states
+plotPosteriorFit(trace = mm , fitmodel = SEIARXYZ, init.state = init.state, data = Dataseries)
+?plotPosteriorFit
+
+
+plotPosteriorFit(trace = mm , fitmodel = SEIARXYZ, init.state = init.state, data = Dataseries,
+                 posterior.summary = c("sample", "median", "mean", "max"), summary = TRUE,
+                 sample.size = 300, non.extinct = NULL, alpha = min(1, 30/sample.size),
+                 plot = TRUE, all.vars = FALSE, init.date = NULL)
 
